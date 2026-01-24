@@ -1,0 +1,25 @@
+{
+  "name": "r2-drive",
+  "type": "module",
+  "scripts": {
+    "dev": "wrangler dev",
+    "deploy": "wrangler deploy --minify",
+    "db:generate": "drizzle-kit generate",
+    "db:update": "drizzle-kit push",
+    "db:migrate:local": "bun run migrate.ts local",
+    "db:migrate:cloud": "bun run migrate.ts cloud",
+    "cf-typegen": "wrangler types --env-interface CloudflareBindings"
+  },
+  "dependencies": {
+    "@cloudflare/workers-types": "^4.20260124.0",
+    "@libsql/client": "^0.17.0",
+    "@types/node": "^25.0.10",
+    "better-auth": "^1.4.17",
+    "drizzle-kit": "^0.31.8",
+    "drizzle-orm": "^0.45.1",
+    "hono": "^4.11.5"
+  },
+  "devDependencies": {
+    "wrangler": "^4.4.0"
+  }
+}
