@@ -6,11 +6,17 @@
 	"compatibility_flags": [
 		"nodejs_compat"
 	],
+	"kv_namespaces": [
+		{
+			"binding": "kv_r2_drive",
+			"id": "90cfdc7a12f54977b6f5dcdb5660590e"
+		}
+	],
 	"d1_databases": [
 		{
-			"binding": "r2_drive",
-			"database_name": "r2-drive",
-			"database_id": "84ec1938-c189-4565-914a-da5592e8cbc5"
+			"binding": "db_r2_drive",
+			"database_name": "db_r2_drive",
+			"database_id": "c7ca369c-a319-4d37-89f9-b92747caefee"
 		}
 	],
 	// "vars": {

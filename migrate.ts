@@ -1,23 +1,13 @@
 import { execSync } from "child_process";
-import { readFileSync, existsSync } from "fs";
+import { existsSync, readdirSync, statSync } from "fs";
 import { join } from "path";
 
-const DATABASE_NAME = "r2-drive";
+const DATABASE_NAME = "db_r2_drive";
 const MIGRATIONS_DIR = "./drizzle/migrations";
-const JOURNAL_PATH = join(MIGRATIONS_DIR, "meta", "_journal.json");
 
-interface JournalEntry {
-  idx: number;
-  version: string;
-  when: number;
-  tag: string;
-  breakpoints: boolean;
-}
-
-interface Journal {
-  version: string;
-  dialect: string;
-  entries: JournalEntry[];
+interface MigrationEntry {
+  folder: string;
+  sqlPath: string;
 }
 
 function getEnvironmentFlag(): string {
@@ -124,41 +114,59 @@ function getAppliedMigrations(flag: string): Set<string> {
   }
 }
 
-function getJournalEntries(): JournalEntry[] {
-  if (!existsSync(JOURNAL_PATH)) {
-    console.error(`Journal file not found at ${JOURNAL_PATH}`);
+function getMigrationEntries(): MigrationEntry[] {
+  if (!existsSync(MIGRATIONS_DIR)) {
+    console.error(`Migrations directory not found at ${MIGRATIONS_DIR}`);
     console.error("Run 'bun run db:generate' first to generate migrations.");
     process.exit(1);
   }
 
-  const journal: Journal = JSON.parse(readFileSync(JOURNAL_PATH, "utf-8"));
-  return journal.entries.sort((a, b) => a.idx - b.idx);
+  const entries: MigrationEntry[] = [];
+  const items = readdirSync(MIGRATIONS_DIR);
+
+  for (const item of items) {
+    const itemPath = join(MIGRATIONS_DIR, item);
+
+    // Skip non-directories (and legacy meta folder if present)
+    if (!statSync(itemPath).isDirectory() || item === "meta") {
+      continue;
+    }
+
+    const sqlPath = join(itemPath, "migration.sql");
+    if (existsSync(sqlPath)) {
+      entries.push({
+        folder: item,
+        sqlPath,
+      });
+    }
+  }
+
+  // Sort by folder name (timestamp prefix ensures correct order)
+  return entries.sort((a, b) => a.folder.localeCompare(b.folder));
 }
 
-function runMigration(entry: JournalEntry, flag: string): void {
-  const migrationFile = join(MIGRATIONS_DIR, `${entry.tag}.sql`);
-
-  if (!existsSync(migrationFile)) {
-    console.error(`Migration file not found: ${migrationFile}`);
+function runMigration(entry: MigrationEntry, flag: string): void {
+  if (!existsSync(entry.sqlPath)) {
+    console.error(`Migration file not found: ${entry.sqlPath}`);
     process.exit(1);
   }
 
-  console.log(`\nRunning migration: ${entry.tag}`);
+  console.log(`\nRunning migration: ${entry.folder}`);
 
   // Execute the migration SQL file
   execSync(
-    `bunx wrangler d1 execute ${DATABASE_NAME} ${flag} --file="${migrationFile}"`,
+    `bunx wrangler d1 execute ${DATABASE_NAME} ${flag} --file="${entry.sqlPath}"`,
     { stdio: "inherit" }
   );
 
-  // Record the migration as applied
-  const recordSQL = `INSERT INTO _migrations (tag) VALUES ('${entry.tag}');`;
+  // Record the migration as applied (use folder name as tag)
+  const recordSQL = `INSERT INTO _migrations (tag) VALUES ('${entry.folder}');`;
   execSync(
     `bunx wrangler d1 execute ${DATABASE_NAME} ${flag} --command="${recordSQL}"`,
     { stdio: "inherit" }
   );
 
-  console.log(`✓ Migration ${entry.tag} applied successfully`);
+  console.log(`✓ Migration ${entry.folder} applied successfully`);
 }
 
 async function main() {
@@ -171,9 +179,9 @@ async function main() {
   // Ensure migrations tracking table exists
   ensureMigrationsTable(flag);
 
-  // Get all migrations from journal
-  const allMigrations = getJournalEntries();
-  console.log(`Found ${allMigrations.length} migration(s) in journal`);
+  // Get all migrations from folder structure
+  const allMigrations = getMigrationEntries();
+  console.log(`Found ${allMigrations.length} migration(s) in migrations folder`);
 
   // Get already applied migrations
   const appliedMigrations = getAppliedMigrations(flag);
@@ -181,7 +189,7 @@ async function main() {
 
   // Find pending migrations
   const pendingMigrations = allMigrations.filter(
-    (entry) => !appliedMigrations.has(entry.tag)
+    (entry) => !appliedMigrations.has(entry.folder)
   );
 
   if (pendingMigrations.length === 0) {
@@ -191,12 +199,12 @@ async function main() {
 
   console.log(`\n${pendingMigrations.length} pending migration(s) to apply:`);
   for (const migration of pendingMigrations) {
-    console.log(`  - ${migration.tag}`);
+    console.log(`  - ${migration.folder}`);
   }
 
   console.log("\n" + "=".repeat(50));
 
-  // Run each pending migration in order
+  // Run each pending migration in order (sorted by timestamp prefix)
   for (const migration of pendingMigrations) {
     runMigration(migration, flag);
   }
