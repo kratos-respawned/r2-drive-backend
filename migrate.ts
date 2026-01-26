@@ -54,7 +54,7 @@ function ensureMigrationsTable(flag: string): void {
   console.log("Ensuring _migrations table exists...");
   execSync(
     `bunx wrangler d1 execute ${DATABASE_NAME} ${flag} --command="${createTableSQL.replace(/\n/g, " ")}"`,
-    { stdio: "inherit" }
+    { stdio: "inherit" },
   );
 }
 
@@ -62,7 +62,7 @@ function getAppliedMigrations(flag: string): Set<string> {
   try {
     const result = execWrangler(
       `d1 execute ${DATABASE_NAME} --command="SELECT tag FROM _migrations ORDER BY id"`,
-      flag
+      flag,
     );
 
     const applied = new Set<string>();
@@ -110,6 +110,7 @@ function getAppliedMigrations(flag: string): Set<string> {
     return applied;
   } catch (error) {
     // Table might not exist yet
+    console.error("Error getting applied migrations:", error);
     return new Set<string>();
   }
 }
@@ -154,17 +155,15 @@ function runMigration(entry: MigrationEntry, flag: string): void {
   console.log(`\nRunning migration: ${entry.folder}`);
 
   // Execute the migration SQL file
-  execSync(
-    `bunx wrangler d1 execute ${DATABASE_NAME} ${flag} --file="${entry.sqlPath}"`,
-    { stdio: "inherit" }
-  );
+  execSync(`bunx wrangler d1 execute ${DATABASE_NAME} ${flag} --file="${entry.sqlPath}"`, {
+    stdio: "inherit",
+  });
 
   // Record the migration as applied (use folder name as tag)
   const recordSQL = `INSERT INTO _migrations (tag) VALUES ('${entry.folder}');`;
-  execSync(
-    `bunx wrangler d1 execute ${DATABASE_NAME} ${flag} --command="${recordSQL}"`,
-    { stdio: "inherit" }
-  );
+  execSync(`bunx wrangler d1 execute ${DATABASE_NAME} ${flag} --command="${recordSQL}"`, {
+    stdio: "inherit",
+  });
 
   console.log(`✓ Migration ${entry.folder} applied successfully`);
 }
@@ -188,9 +187,7 @@ async function main() {
   console.log(`${appliedMigrations.size} migration(s) already applied`);
 
   // Find pending migrations
-  const pendingMigrations = allMigrations.filter(
-    (entry) => !appliedMigrations.has(entry.folder)
-  );
+  const pendingMigrations = allMigrations.filter((entry) => !appliedMigrations.has(entry.folder));
 
   if (pendingMigrations.length === 0) {
     console.log("\n✓ Database is up to date. No migrations to run.");
