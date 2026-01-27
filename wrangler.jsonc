@@ -1,9 +1,11 @@
 {
   "$schema": "node_modules/wrangler/config-schema.json",
-  "name": "r2-drive",
+  "name": "r2-drive-backend",
   "main": "src/index.ts",
   "compatibility_date": "2026-01-24",
-  "compatibility_flags": ["nodejs_compat"],
+  "compatibility_flags": [
+    "nodejs_compat"
+  ],
   "kv_namespaces": [
     {
       "binding": "kv_r2_drive",
