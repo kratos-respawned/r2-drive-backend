@@ -21,9 +21,8 @@ export const deleteFileValidator = z.object({
 });
 
 export const updateFileValidator = z.object({
-  id: z.string().transform(Number),
-  name: z.string(),
-  parentPath: z.string(),
+  name: z.string().max(255),
+  parentPath: z.string().max(1000),
 });
 
 export const createFolderValidator = z.object({

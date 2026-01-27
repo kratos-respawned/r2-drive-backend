@@ -1,5 +1,5 @@
 import { sql } from "drizzle-orm";
-import { index, sqliteTable } from "drizzle-orm/sqlite-core";
+import { index, sqliteTable, unique } from "drizzle-orm/sqlite-core";
 
 export const objects = sqliteTable(
   "objects",
@@ -7,7 +7,7 @@ export const objects = sqliteTable(
     id: t.integer().primaryKey(),
     ownerId: t.text("owner_id").notNull(),
     name: t.text("name").notNull(),
-    path: t.text("path").notNull().unique(),
+    path: t.text("path").notNull(),
     parentPath: t.text("parent_path").notNull().default(""), // "" for root level
     key: t.text("key"), // null for folders (they don't exist in R2)
     thumbnail: t.text("thumbnail"),
@@ -26,6 +26,7 @@ export const objects = sqliteTable(
     index("objects_owner_id_idx").on(table.ownerId),
     index("objects_parent_path_idx").on(table.parentPath),
     index("objects_owner_id_parent_path_idx").on(table.ownerId, table.parentPath),
+    unique("objects_owner_id_path_unique").on(table.ownerId, table.path),
   ],
 );
 

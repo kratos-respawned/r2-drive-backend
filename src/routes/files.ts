@@ -163,9 +163,11 @@ files.delete("/:id", zValidator("param", deleteFileValidator), async (c) => {
   return c.json({ message: `${!file.key ? "Folder" : "File"} deleted` }, 200);
 });
 
-files.put("/:id", zValidator("json", updateFileValidator), async (c) => {
-  const { id, name, parentPath } = c.req.valid("json");
-  const fullPath = parentPath ? `${parentPath}/${name}` : name;
+files.put("/:id", zValidator("param", deleteFileValidator), zValidator("json", updateFileValidator), async (c) => {
+  const { id } = c.req.valid("param");
+  const { name, parentPath } = c.req.valid("json");
+  // const normalizedName = name.replace(/\/$/, "").replace(/ /g, "_").replace(/-/g, "_").toLowerCase();
+  // entPath}/${normalizedName}` : normalizedName;
   const currentUser = c.get("user");
   const files = await db
     .select()
@@ -178,8 +180,9 @@ files.put("/:id", zValidator("json", updateFileValidator), async (c) => {
   await db
     .update(objects)
     .set({
-      name,
-      path: fullPath,
+      name: name.trim(),
+      // will implement this later when implementing move and copy paste
+      // path: parentPath,
       parentPath: parentPath,
     })
     .where(eq(objects.id, id));
@@ -189,10 +192,15 @@ files.put("/:id", zValidator("json", updateFileValidator), async (c) => {
 files.post("/folder", zValidator("json", createFolderValidator), async (c) => {
   const currentUser = c.get("user");
   const { name, parentPath } = c.req.valid("json");
-  const fullPath = parentPath ? `${parentPath}/${name}` : name;
+  const normalizedName = name.replace(/\/$/, "").replace(/ /g, "_").replace(/-/g, "_").toLowerCase();
+  const fullPath = parentPath ? `${parentPath}/${normalizedName}` : normalizedName;
+  const existingObject = await db.select().from(objects).where(and(eq(objects.ownerId, currentUser.id), eq(objects.path, fullPath)));
+  if (existingObject.length > 0) {
+    return c.json({ error: "Folder already exists" }, 400);
+  }
   const newFolder = await db.insert(objects).values({
     ownerId: currentUser.id,
-    name,
+    name: name,
     path: fullPath,
     parentPath: parentPath,
     contentType: "folder",
