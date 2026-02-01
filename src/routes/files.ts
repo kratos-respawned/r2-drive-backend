@@ -4,13 +4,15 @@ import { Hono } from "hono";
 import { db } from "../db";
 import { user } from "../db/auth-schema";
 import { objects, uploadRequests } from "../db/file-schema";
-import { deleteObject, getExtension, getPresignedPutUrl } from "../lib/s3-utils";
+import { deleteObject, getFileUrl, getPresignedPutUrl, r2KeyToThumbnailKey } from "../lib/s3-utils";
 import { authMiddleware } from "../middleware";
 import { HonoEnv } from "../types";
 import {
+  convertBytesToKB,
   createFileValidator,
   createFolderValidator,
   deleteFileValidator,
+  getThumbnailValidator,
   updateFileValidator,
   uploadUrlValidator,
 } from "../validators/files";
@@ -43,15 +45,16 @@ files.get("/", async (c) => {
 
 files.post("/upload-url", zValidator("json", uploadUrlValidator), async (c) => {
   const currentUser = c.get("user");
-  const { contentType, size, name, parentPath } = c.req.valid("json");
 
+  const { contentType, size, name, parentPath, thumbnail } = c.req.valid("json");
+  const sizeInKB = convertBytesToKB(size) + convertBytesToKB(thumbnail?.size ?? 0);
   // Check storage quota
   const [userData] = await db
     .select({ storageAllocated: user.storageAllocated, storageUsed: user.storageUsed })
     .from(user)
     .where(eq(user.id, currentUser.id));
 
-  if (userData.storageUsed + size > userData.storageAllocated) {
+  if (userData.storageUsed + sizeInKB > userData.storageAllocated) {
     return c.json({ error: "Storage quota exceeded" }, 400);
   }
 
@@ -69,23 +72,23 @@ files.post("/upload-url", zValidator("json", uploadUrlValidator), async (c) => {
   if (existingFile.length > 0) {
     return c.json({ error: "File already exists" }, 400);
   }
-  const extension = getExtension(name);
-  const { url, key } = await getPresignedPutUrl(contentType, size, extension);
+  const { url, key, thumbnailUrl } = await getPresignedPutUrl({ contentType, size, thumbnail });
   await db.insert(uploadRequests).values({
     ownerId: currentUser.id,
     key,
     fileName: name,
     parentPath: normalizedParentPath,
     contentType,
-    size,
+    size: sizeInKB,
     status: "pending",
   });
-  return c.json({ url, key });
+  return c.json({ url, key, thumbnailUrl });
 });
 
 files.post("/", zValidator("json", createFileValidator), async (c) => {
   const currentUser = c.get("user");
-  const { key, name, contentType, size, parentPath, thumbnail } = c.req.valid("json");
+  const { key, name, contentType, parentPath, size } = c.req.valid("json");
+  const thumbnail = contentType.startsWith("image/") ? key : null;
   const normalizedParentPath = parentPath ?? "";
   const fullPath = normalizedParentPath ? `${normalizedParentPath}/${name}` : name;
   const [uploadRequest, existingFile] = await db.batch([
@@ -110,7 +113,6 @@ files.post("/", zValidator("json", createFileValidator), async (c) => {
   if (existingFile.length > 0) {
     return c.json({ error: "File already exists at this path" }, 409);
   }
-
   // Batch insert and updates in a single round trip
   const [insertedFiles] = await db.batch([
     db
@@ -123,7 +125,7 @@ files.post("/", zValidator("json", createFileValidator), async (c) => {
         parentPath: normalizedParentPath,
         contentType,
         size,
-        thumbnail: thumbnail ?? null,
+        thumbnail,
       })
       .returning(),
     db
@@ -154,6 +156,9 @@ files.delete("/:id", zValidator("param", deleteFileValidator), async (c) => {
   // if there is no key, it is a folder, so we don't need to delete it from R2
   if (file.key) {
     await deleteObject(file.key);
+    if (file.thumbnail) {
+      await deleteObject(r2KeyToThumbnailKey(file.thumbnail));
+    }
     await db.delete(uploadRequests).where(eq(uploadRequests.key, file.key));
     await db
       .update(user)
@@ -207,4 +212,31 @@ files.post("/folder", zValidator("json", createFolderValidator), async (c) => {
   });
   return c.json(newFolder, 201);
 });
+files.get("/:id", zValidator("param", deleteFileValidator), async (c) => {
+  const { id } = c.req.valid("param");
+  const currentUser = c.get("user");
+  const [file] = await db.select().from(objects).where(and(eq(objects.ownerId, currentUser.id), eq(objects.id, id)));
+  if (!file) {
+    return c.json({ error: "File not found" }, 404);
+  }
+  if (!file.key) {
+    return c.json({ error: "Folder does not have a file URL" }, 400);
+  }
+  const url = await getFileUrl(file.key);
+  return c.json({ url: url });
+});
+files.get("/:id/thumbnail", zValidator("param", getThumbnailValidator), async (c) => {
+  const { id } = c.req.valid("param");
+  const currentUser = c.get("user");
+  const [file] = await db.select().from(objects).where(and(eq(objects.ownerId, currentUser.id), eq(objects.key, id)));
+  if (!file) {
+    return c.json({ error: "File not found" }, 404);
+  }
+  if (!file.thumbnail) {
+    return c.json({ error: "File does not have a thumbnail" }, 400);
+  }
+  const url = await getFileUrl(r2KeyToThumbnailKey(file.thumbnail));
+  return c.redirect(url);
+});
 export default files;
+

@@ -1,7 +1,10 @@
 import { betterAuth } from "better-auth";
 import { drizzleAdapter } from "better-auth/adapters/drizzle";
+import { customSession } from "better-auth/plugins";
 import { env } from "cloudflare:workers";
+import { eq } from "drizzle-orm";
 import { db } from "./db";
+import { user } from "./db/auth-schema";
 import { sendEmail } from "./lib/mail";
 
 export const auth = betterAuth({
@@ -56,5 +59,18 @@ export const auth = betterAuth({
       });
     },
     autoSignInAfterVerification: true,
-  }
+  },
+  plugins: [
+    customSession(async (sessionObj) => {
+      const [userData] = await db.select().from(user).where(eq(user.id, sessionObj.session.userId));
+      return {
+        user: {
+          ...sessionObj.user,
+          storageAllocated: userData.storageAllocated,
+          storageUsed: userData.storageUsed,
+        },
+        session: sessionObj.session,
+      };
+    }),
+  ]
 });

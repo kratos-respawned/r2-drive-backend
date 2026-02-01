@@ -1,11 +1,13 @@
 import {
-  S3Client,
+  DeleteObjectCommand,
   GetObjectCommand,
   PutObjectCommand,
-  DeleteObjectCommand,
+  S3Client,
 } from "@aws-sdk/client-s3";
 import { getSignedUrl } from "@aws-sdk/s3-request-presigner";
 import { env } from "cloudflare:workers";
+import z from "zod";
+import { thumbnailValidator } from "../validators/files";
 
 const S3 = new S3Client({
   region: "auto",
@@ -29,9 +31,14 @@ export const getFileUrl = async (key: string) => {
  * @param extension - Optional file extension (e.g., ".jpg") for easier debugging in R2 console
  * @returns Presigned URL and unique R2 key
  */
-export const getPresignedPutUrl = async (contentType: string, size: number, extension?: string) => {
+interface GetPresignedPutUrlParams {
+  contentType: string;
+  size: number;
+  thumbnail?: z.infer<typeof thumbnailValidator> | null;
+}
+export const getPresignedPutUrl = async ({ contentType, size, thumbnail }: GetPresignedPutUrlParams) => {
   // R2 key is just a UUID (optionally with extension for easier identification in R2 console)
-  const r2Key = extension ? `${crypto.randomUUID()}${extension}` : crypto.randomUUID();
+  const r2Key = crypto.randomUUID();
 
   const url = await getSignedUrl(
     S3,
@@ -43,7 +50,19 @@ export const getPresignedPutUrl = async (contentType: string, size: number, exte
     }),
     { expiresIn: 3600 },
   );
-  return { url, key: r2Key };
+
+  const thumbnailUrl = thumbnail ? await getSignedUrl(
+    S3,
+    new PutObjectCommand({
+      Bucket: env.BUCKET_NAME,
+      Key: r2KeyToThumbnailKey(r2Key),
+      ContentType: thumbnail.contentType,
+      ContentLength: thumbnail.size,
+    }),
+    { expiresIn: 3600 },
+  ) : null;
+
+  return { url, key: r2Key, thumbnailUrl };
 };
 
 export const deleteObject = async (key: string) => {
@@ -53,10 +72,8 @@ export const deleteObject = async (key: string) => {
     throw new Error("Failed to delete object");
   }
 };
-/**
- * Extract file extension from filename
- */
-export const getExtension = (filename: string): string | undefined => {
-  const lastDot = filename.lastIndexOf(".");
-  return lastDot !== -1 ? filename.slice(lastDot) : undefined;
+
+
+export const r2KeyToThumbnailKey = (key: string) => {
+  return `thumb/${key}`;
 };
