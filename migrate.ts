@@ -2,7 +2,8 @@ import { execSync } from "child_process";
 import { existsSync, readdirSync, statSync } from "fs";
 import { join } from "path";
 
-const DATABASE_NAME = "db_r2_drive";
+// optional second arg targets a different database, e.g. `bun run migrate.ts cloud db-r2-drive-dev`
+const DATABASE_NAME = process.argv[3] ?? "db_r2_drive";
 const MIGRATIONS_DIR = "./drizzle/migrations";
 
 interface MigrationEntry {

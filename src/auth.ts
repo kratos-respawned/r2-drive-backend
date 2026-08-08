@@ -5,13 +5,24 @@ import { env } from "cloudflare:workers";
 import { eq } from "drizzle-orm";
 import { db } from "./db";
 import { user } from "./db/auth-schema";
+import { DEFAULT_STORAGE_ALLOCATED_KB } from "./lib/constants";
 import { sendEmail } from "./lib/mail";
 
 export const auth = betterAuth({
   database: drizzleAdapter(db, { provider: "sqlite" }),
   baseURL: env.BETTER_AUTH_URL,
+  // BETTER_AUTH_URL (the API's own origin) is implicitly trusted; native clients
+  // send it as their Origin. Never drop it by overriding trustedOrigins fully.
   trustedOrigins: [env.ORIGIN_URL],
   secret: env.BETTER_AUTH_SECRET,
+
+  user: {
+    // input: false — clients can never set their own quota at sign-up
+    additionalFields: {
+      storageAllocated: { type: "number", defaultValue: DEFAULT_STORAGE_ALLOCATED_KB, input: false },
+      storageUsed: { type: "number", defaultValue: 0, input: false },
+    },
+  },
 
   secondaryStorage: {
     get: async (key: string) => {

@@ -2,6 +2,7 @@ import { env } from "cloudflare:workers";
 import { Hono } from "hono";
 import { cors } from "hono/cors";
 import { auth } from "./auth";
+import { runStorageCleanup } from "./lib/cleanup";
 import files from "./routes/files";
 import { HonoEnv } from "./types";
 const app = new Hono<HonoEnv>();
@@ -9,8 +10,9 @@ const app = new Hono<HonoEnv>();
 app.use(
   "*", // or replace with "*" to enable cors for all routes
   cors({
-    origin: env.ORIGIN_URL, // replace with your origin
-    allowHeaders: ["Content-Type", "Authorization"],
+    // hono's cors crashes on every request if origin is undefined
+    origin: env.ORIGIN_URL ?? "http://localhost:5173",
+    allowHeaders: ["Content-Type", "Authorization", "X-Include-Hidden"],
     allowMethods: ["POST", "GET", "OPTIONS", "DELETE", "PUT", "PATCH"],
     exposeHeaders: ["Content-Length"],
     maxAge: 600,
@@ -19,7 +21,10 @@ app.use(
 );
 
 
-app.on(["POST", "GET"], "/api/auth/**", (c) => auth.handler(c.req.raw));
+// "/*" (not "/**"): "**" is undocumented and only happens to match nested paths
+// under RegExpRouter; when route shapes force SmartRouter onto TrieRouter it
+// silently stops matching and every auth endpoint 404s
+app.on(["POST", "GET"], "/api/auth/*", (c) => auth.handler(c.req.raw));
 app.get("/", async (c) => {
   return c.json({ message: "R2 Drive API" });
 });
@@ -34,4 +39,9 @@ app.get("/session", async (c) => {
 });
 app.route("/api/files", files);
 
-export default app;
+export default {
+  fetch: app.fetch,
+  scheduled: (_controller, _env, ctx) => {
+    ctx.waitUntil(runStorageCleanup());
+  },
+} satisfies ExportedHandler<CloudflareBindings>;

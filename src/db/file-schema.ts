@@ -41,6 +41,9 @@ export const uploadRequests = sqliteTable(
     parentPath: t.text("parent_path").notNull().default(""),
     contentType: t.text("content_type").notNull(),
     size: t.integer("size").notNull(),
+    // the presign included a thumbnail slot; commit then records the thumbnail even
+    // for non-image files (e.g. video posters uploaded by the native client)
+    hasThumbnail: t.integer("has_thumbnail", { mode: "boolean" }).notNull().default(false),
     status: t.text("status").notNull().default("pending"), // pending | completed | expired
     createdAt: t
       .integer("created_at", { mode: "timestamp_ms" })

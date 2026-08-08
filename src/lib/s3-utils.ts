@@ -1,9 +1,4 @@
-import {
-  DeleteObjectCommand,
-  GetObjectCommand,
-  PutObjectCommand,
-  S3Client,
-} from "@aws-sdk/client-s3";
+import { GetObjectCommand, PutObjectCommand, S3Client } from "@aws-sdk/client-s3";
 import { getSignedUrl } from "@aws-sdk/s3-request-presigner";
 import { env } from "cloudflare:workers";
 import z from "zod";
@@ -65,15 +60,25 @@ export const getPresignedPutUrl = async ({ contentType, size, thumbnail }: GetPr
   return { url, key: r2Key, thumbnailUrl };
 };
 
-export const deleteObject = async (key: string) => {
-  const command = new DeleteObjectCommand({ Bucket: env.BUCKET_NAME, Key: key });
-  const result = await S3.send(command);
-  if (result.DeleteMarker) {
-    throw new Error("Failed to delete object");
+// deletes and listing use the native R2 binding: the S3 XML APIs cannot be
+// parsed in workerd (the AWS SDK resolves a DOMParser-based XML parser there)
+export const deleteObjects = async (keys: string[]) => {
+  // the binding accepts at most 1000 keys per call
+  for (let i = 0; i < keys.length; i += 1000) {
+    await env.r2_drive.delete(keys.slice(i, i + 1000));
   }
 };
 
+export const listObjectKeys = async (cursor?: string) => {
+  const result = await env.r2_drive.list({ cursor });
+  return {
+    keys: result.objects.map((object) => object.key),
+    cursor: result.truncated ? result.cursor : undefined,
+  };
+};
+
+export const THUMBNAIL_PREFIX = "thumb/";
 
 export const r2KeyToThumbnailKey = (key: string) => {
-  return `thumb/${key}`;
+  return `${THUMBNAIL_PREFIX}${key}`;
 };
