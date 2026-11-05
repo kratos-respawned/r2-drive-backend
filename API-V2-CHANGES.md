@@ -114,9 +114,8 @@ without a spec).
 
 ## 8. Signup default quota
 
-New accounts get `storage_allocated = 10485760` KB (10 GB) at creation;
-existing zero-quota accounts were backfilled by migration. A fresh signup can
-upload immediately.
+New accounts get `storage_allocated = 0`, so every upload fails with
+"Storage quota exceeded" until an admin raises the quota in the database.
 
 ## 9. Origin policy (unchanged guarantees, now pinned by tests)
 

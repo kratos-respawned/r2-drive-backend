@@ -55,6 +55,19 @@ export const batchCommitValidator = z.object({
   items: z.array(createFileValidator).min(1).max(100),
 });
 
+export const startMultipartValidator = uploadUrlValidator.extend({
+  size: z.number().int().positive(),
+});
+export const partUrlsValidator = z.object({
+  partNumbers: z.array(z.number().int().min(1).max(10_000)).min(1).max(32),
+});
+export const completeMultipartValidator = z.object({
+  parts: z
+    .array(z.object({ partNumber: z.number().int().min(1).max(10_000), etag: z.string().min(1) }))
+    .min(1)
+    .max(10_000),
+});
+
 export const getThumbnailValidator = z.object({
   id: z.string(),
 });

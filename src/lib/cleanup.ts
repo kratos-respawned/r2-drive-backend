@@ -1,11 +1,19 @@
-import { and, eq, inArray, lt } from "drizzle-orm";
+import { and, eq, inArray, isNotNull, isNull, lt } from "drizzle-orm";
 import { db } from "../db";
 import { objects, uploadRequests } from "../db/file-schema";
 import { chunked } from "./chunk";
-import { deleteObjects, listObjectKeys, r2KeyToThumbnailKey, THUMBNAIL_PREFIX } from "./s3-utils";
+import {
+  abortMultipartUpload,
+  deleteObjects,
+  listObjectKeys,
+  r2KeyToThumbnailKey,
+  THUMBNAIL_PREFIX,
+} from "./s3-utils";
 
 // presigned upload URLs expire after 1 hour, so pending requests older than that are dead
 const UPLOAD_REQUEST_TTL_MS = 60 * 60 * 1000;
+// a working client asks for part URLs every few minutes, so this much silence means it left
+const MULTIPART_IDLE_TTL_MS = 2 * 60 * 60 * 1000;
 // one bound parameter per key in the IN lists below
 const CHUNK_SIZE = 90;
 
@@ -19,7 +27,13 @@ export const expireStalePendingUploadsQuery = () => {
   return db
     .update(uploadRequests)
     .set({ status: "expired" })
-    .where(and(eq(uploadRequests.status, "pending"), lt(uploadRequests.createdAt, cutoff)));
+    .where(
+      and(
+        eq(uploadRequests.status, "pending"),
+        isNull(uploadRequests.uploadId),
+        lt(uploadRequests.createdAt, cutoff),
+      ),
+    );
 };
 
 /** Expire stale pending upload requests and delete whatever they uploaded to R2. */
@@ -28,6 +42,26 @@ export const expireStaleUploadRequests = async () => {
   // deleting keys that were never uploaded is a no-op, so this is safe for both cases
   await deleteObjects(expired.flatMap(({ key }) => [key, r2KeyToThumbnailKey(key)]));
   return expired.length;
+};
+
+/** Free the parts of multipart uploads the client walked away from. */
+export const expireAbandonedMultipartUploads = async () => {
+  const cutoff = new Date(Date.now() - MULTIPART_IDLE_TTL_MS);
+  const abandoned = await db
+    .update(uploadRequests)
+    .set({ status: "expired" })
+    .where(
+      and(
+        eq(uploadRequests.status, "pending"),
+        isNotNull(uploadRequests.uploadId),
+        lt(uploadRequests.lastActivityAt, cutoff),
+      ),
+    )
+    .returning({ key: uploadRequests.key, uploadId: uploadRequests.uploadId });
+  // a failed abort is not retried here: the bucket's 7-day lifecycle rule catches it
+  await Promise.allSettled(abandoned.map(({ key, uploadId }) => abortMultipartUpload(key, uploadId as string)));
+  await deleteObjects(abandoned.flatMap(({ key }) => [key, r2KeyToThumbnailKey(key)]));
+  return abandoned.length;
 };
 
 /**
@@ -73,8 +107,9 @@ export const sweepOrphanedObjects = async () => {
 
 export const runStorageCleanup = async () => {
   const expiredCount = await expireStaleUploadRequests();
+  const abandonedCount = await expireAbandonedMultipartUploads();
   const orphanCount = await sweepOrphanedObjects();
   console.log(
-    `storage cleanup: expired ${expiredCount} upload requests, deleted ${orphanCount} orphaned R2 objects`,
+    `storage cleanup: expired ${expiredCount} upload requests, aborted ${abandonedCount} multipart uploads, deleted ${orphanCount} orphaned R2 objects`,
   );
 };

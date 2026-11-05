@@ -5,7 +5,6 @@ import { env } from "cloudflare:workers";
 import { eq } from "drizzle-orm";
 import { db } from "./db";
 import { user } from "./db/auth-schema";
-import { DEFAULT_STORAGE_ALLOCATED_KB } from "./lib/constants";
 import { sendEmail } from "./lib/mail";
 
 export const auth = betterAuth({
@@ -18,8 +17,9 @@ export const auth = betterAuth({
 
   user: {
     // input: false — clients can never set their own quota at sign-up
+    // signup is open, so storage is only ever granted by hand in the database
     additionalFields: {
-      storageAllocated: { type: "number", defaultValue: DEFAULT_STORAGE_ALLOCATED_KB, input: false },
+      storageAllocated: { type: "number", defaultValue: 0, input: false },
       storageUsed: { type: "number", defaultValue: 0, input: false },
     },
   },

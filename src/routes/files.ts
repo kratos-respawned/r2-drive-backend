@@ -7,16 +7,29 @@ import { user } from "../db/auth-schema";
 import { objects, uploadRequests } from "../db/file-schema";
 import { chunked } from "../lib/chunk";
 import { expireStalePendingUploadsQuery } from "../lib/cleanup";
-import { deleteObjects, getFileUrl, getPresignedPutUrl, r2KeyToThumbnailKey } from "../lib/s3-utils";
+import {
+  abortMultipartUpload,
+  completeMultipartUpload,
+  deleteObjects,
+  getFileUrl,
+  getPartLayout,
+  getPresignedPartUrl,
+  getPresignedPutUrl,
+  r2KeyToThumbnailKey,
+  startMultipartUpload,
+} from "../lib/s3-utils";
 import { authMiddleware } from "../middleware";
 import { HonoEnv } from "../types";
 import {
   batchCommitValidator,
+  completeMultipartValidator,
   convertBytesToKB,
   createFileValidator,
   createFolderValidator,
   deleteFileValidator,
   getThumbnailValidator,
+  partUrlsValidator,
+  startMultipartValidator,
   updateFileValidator,
   uploadUrlsValidator,
   uploadUrlValidator,
@@ -87,11 +100,7 @@ files.get("/", async (c) => {
   });
 });
 
-files.post("/upload-url", zValidator("json", uploadUrlValidator), async (c) => {
-  const currentUser = c.get("user");
-
-  const { contentType, size, name, parentPath, thumbnail } = c.req.valid("json");
-  const sizeInKB = convertBytesToKB(size) + convertBytesToKB(thumbnail?.size ?? 0);
+const findUploadRejection = async (ownerId: string, name: string, parentPath: string, sizeInKB: number) => {
   // expiring stale pendings first keeps an interrupted sync's phantom uploads
   // from counting toward the quota in the sum below
   const [, userRows, pendingRows, existingFile, parentFolder] = await db.batch([
@@ -99,34 +108,46 @@ files.post("/upload-url", zValidator("json", uploadUrlValidator), async (c) => {
     db
       .select({ storageAllocated: user.storageAllocated, storageUsed: user.storageUsed })
       .from(user)
-      .where(eq(user.id, currentUser.id)),
+      .where(eq(user.id, ownerId)),
     db
       .select({ size: sql<number>`coalesce(sum(${uploadRequests.size}), 0)` })
       .from(uploadRequests)
-      .where(and(eq(uploadRequests.ownerId, currentUser.id), eq(uploadRequests.status, "pending"))),
+      .where(and(eq(uploadRequests.ownerId, ownerId), eq(uploadRequests.status, "pending"))),
     db
       .select({ id: objects.id })
       .from(objects)
       .where(
         and(
-          eq(objects.ownerId, currentUser.id),
+          eq(objects.ownerId, ownerId),
           eq(objects.name, name),
           eq(objects.parentPath, parentPath),
         ),
       ),
-    selectFolder(currentUser.id, parentPath),
+    selectFolder(ownerId, parentPath),
   ]);
   const [userData] = userRows;
   // count in-flight uploads against the quota so parallel requests can't overshoot it
   const pendingSize = pendingRows[0]?.size ?? 0;
   if (userData.storageUsed + pendingSize + sizeInKB > userData.storageAllocated) {
-    return c.json({ error: "Storage quota exceeded" }, 400);
+    return { error: "Storage quota exceeded", status: 400 } as const;
   }
   if (existingFile.length > 0) {
-    return c.json({ error: "File already exists" }, 400);
+    return { error: "File already exists", status: 400 } as const;
   }
   if (parentPath !== "" && parentFolder.length === 0) {
-    return c.json({ error: "Parent folder not found" }, 404);
+    return { error: "Parent folder not found", status: 404 } as const;
+  }
+  return null;
+};
+
+files.post("/upload-url", zValidator("json", uploadUrlValidator), async (c) => {
+  const currentUser = c.get("user");
+
+  const { contentType, size, name, parentPath, thumbnail } = c.req.valid("json");
+  const sizeInKB = convertBytesToKB(size) + convertBytesToKB(thumbnail?.size ?? 0);
+  const rejection = await findUploadRejection(currentUser.id, name, parentPath, sizeInKB);
+  if (rejection) {
+    return c.json({ error: rejection.error }, rejection.status);
   }
   const { url, key, thumbnailUrl } = await getPresignedPutUrl({ contentType, size, thumbnail });
   await db.insert(uploadRequests).values({
@@ -157,13 +178,102 @@ files.delete("/upload-url/:key", async (c) => {
         eq(uploadRequests.status, "pending"),
       ),
     )
-    .returning({ key: uploadRequests.key });
+    .returning({ uploadId: uploadRequests.uploadId });
   if (cancelled.length === 0) {
     return c.json({ error: "Upload request not found" }, 404);
   }
+  const { uploadId } = cancelled[0];
   // the client may already have PUT some bytes before aborting
-  c.executionCtx.waitUntil(deleteObjects([key, r2KeyToThumbnailKey(key)]));
+  c.executionCtx.waitUntil(
+    Promise.allSettled([
+      deleteObjects([key, r2KeyToThumbnailKey(key)]),
+      uploadId ? abortMultipartUpload(key, uploadId) : undefined,
+    ]),
+  );
   return c.json({ message: "Upload request cancelled" });
+});
+
+files.post("/multipart", zValidator("json", startMultipartValidator), async (c) => {
+  const currentUser = c.get("user");
+  const { contentType, size, name, parentPath, thumbnail } = c.req.valid("json");
+  const sizeInKB = convertBytesToKB(size) + convertBytesToKB(thumbnail?.size ?? 0);
+  const rejection = await findUploadRejection(currentUser.id, name, parentPath, sizeInKB);
+  if (rejection) {
+    return c.json({ error: rejection.error }, rejection.status);
+  }
+  const { key, uploadId, thumbnailUrl } = await startMultipartUpload({ contentType, thumbnail });
+  await db.insert(uploadRequests).values({
+    ownerId: currentUser.id,
+    key,
+    fileName: name,
+    parentPath,
+    contentType,
+    size: sizeInKB,
+    hasThumbnail: Boolean(thumbnail),
+    status: "pending",
+    uploadId,
+    sizeInBytes: size,
+    lastActivityAt: new Date(),
+  });
+  return c.json({ key, thumbnailUrl, ...getPartLayout(size) });
+});
+
+const markMultipartActive = async (ownerId: string, key: string) => {
+  const [upload] = await db
+    .update(uploadRequests)
+    .set({ lastActivityAt: new Date() })
+    .where(
+      and(
+        eq(uploadRequests.ownerId, ownerId),
+        eq(uploadRequests.key, key),
+        eq(uploadRequests.status, "pending"),
+        isNotNull(uploadRequests.uploadId),
+      ),
+    )
+    .returning({ uploadId: uploadRequests.uploadId, sizeInBytes: uploadRequests.sizeInBytes });
+  return upload as { uploadId: string; sizeInBytes: number } | undefined;
+};
+
+files.post("/multipart/:key/part-urls", zValidator("json", partUrlsValidator), async (c) => {
+  const key = c.req.param("key");
+  const { partNumbers } = c.req.valid("json");
+  const upload = await markMultipartActive(c.get("user").id, key);
+  if (!upload) {
+    return c.json({ error: "Invalid or expired upload request" }, 404);
+  }
+  const { uploadId, sizeInBytes: fileSize } = upload;
+  const { partCount } = getPartLayout(fileSize);
+  if (partNumbers.some((partNumber) => partNumber > partCount)) {
+    return c.json({ error: "Part number out of range" }, 400);
+  }
+  const urls = await Promise.all(
+    partNumbers.map(async (partNumber) => ({
+      partNumber,
+      url: await getPresignedPartUrl({ key, uploadId, partNumber, fileSize }),
+    })),
+  );
+  return c.json({ urls });
+});
+
+// joins the parts in R2 only; the client then commits through POST / like any other upload
+files.post("/multipart/:key/complete", zValidator("json", completeMultipartValidator), async (c) => {
+  const key = c.req.param("key");
+  const { parts } = c.req.valid("json");
+  const upload = await markMultipartActive(c.get("user").id, key);
+  if (!upload) {
+    return c.json({ error: "Invalid or expired upload request" }, 404);
+  }
+  // S3 returns ETags wrapped in quotes, the R2 binding expects them bare
+  const uploadedParts = parts.map(({ partNumber, etag }) => ({ partNumber, etag: etag.replaceAll('"', "") }));
+  const joined = await completeMultipartUpload(key, upload.uploadId, uploadedParts).catch(() => null);
+  if (!joined) {
+    return c.json({ error: "Could not join the uploaded parts" }, 400);
+  }
+  if (joined.size !== upload.sizeInBytes) {
+    await deleteObjects([key]);
+    return c.json({ error: "Uploaded size does not match the file" }, 400);
+  }
+  return c.json({ key });
 });
 
 // batch presign for bulk sync: results are positional, one per requested item;

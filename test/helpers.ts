@@ -104,6 +104,11 @@ export const filesApi = (cookie: string) => {
     update: (id: number, body: unknown) => request("PUT", `/${id}`, body),
     remove: (id: number) => request("DELETE", `/${id}`),
     fileUrl: (id: number) => request("GET", `/${id}`),
+    startMultipart: (body: unknown) => request("POST", "/multipart", body),
+    partUrls: (key: string, partNumbers: number[]) =>
+      request("POST", `/multipart/${key}/part-urls`, { partNumbers }),
+    completeMultipart: (key: string, parts: unknown[]) =>
+      request("POST", `/multipart/${key}/complete`, { parts }),
   };
 };
 

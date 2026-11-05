@@ -1,4 +1,4 @@
-import { GetObjectCommand, PutObjectCommand, S3Client } from "@aws-sdk/client-s3";
+import { GetObjectCommand, PutObjectCommand, S3Client, UploadPartCommand } from "@aws-sdk/client-s3";
 import { getSignedUrl } from "@aws-sdk/s3-request-presigner";
 import { env } from "cloudflare:workers";
 import z from "zod";
@@ -6,6 +6,8 @@ import { thumbnailValidator } from "../validators/files";
 
 const S3 = new S3Client({
   region: "auto",
+  // the default bakes an empty-body checksum into presigned URLs
+  requestChecksumCalculation: "WHEN_REQUIRED",
   endpoint: `https://${env.ACCOUNT_ID}.r2.cloudflarestorage.com`,
   credentials: {
     accessKeyId: env.R2_ACCESS_ID_KEY,
@@ -26,6 +28,18 @@ export const getFileUrl = async (key: string) => {
  * @param extension - Optional file extension (e.g., ".jpg") for easier debugging in R2 console
  * @returns Presigned URL and unique R2 key
  */
+const getPresignedThumbnailUrl = (key: string, thumbnail: z.infer<typeof thumbnailValidator>) =>
+  getSignedUrl(
+    S3,
+    new PutObjectCommand({
+      Bucket: env.BUCKET_NAME,
+      Key: r2KeyToThumbnailKey(key),
+      ContentType: thumbnail.contentType,
+      ContentLength: thumbnail.size,
+    }),
+    { expiresIn: 3600 },
+  );
+
 interface GetPresignedPutUrlParams {
   contentType: string;
   size: number;
@@ -46,19 +60,58 @@ export const getPresignedPutUrl = async ({ contentType, size, thumbnail }: GetPr
     { expiresIn: 3600 },
   );
 
-  const thumbnailUrl = thumbnail ? await getSignedUrl(
-    S3,
-    new PutObjectCommand({
-      Bucket: env.BUCKET_NAME,
-      Key: r2KeyToThumbnailKey(r2Key),
-      ContentType: thumbnail.contentType,
-      ContentLength: thumbnail.size,
-    }),
-    { expiresIn: 3600 },
-  ) : null;
+  const thumbnailUrl = thumbnail ? await getPresignedThumbnailUrl(r2Key, thumbnail) : null;
 
   return { url, key: r2Key, thumbnailUrl };
 };
+
+const PART_SIZE = 16 * 1024 * 1024;
+const MAX_PARTS = 10_000;
+
+export const getPartLayout = (size: number) => {
+  const partSize = Math.max(PART_SIZE, Math.ceil(size / MAX_PARTS));
+  return { partSize, partCount: Math.ceil(size / partSize) };
+};
+
+interface StartMultipartUploadParams {
+  contentType: string;
+  thumbnail?: z.infer<typeof thumbnailValidator> | null;
+}
+export const startMultipartUpload = async ({ contentType, thumbnail }: StartMultipartUploadParams) => {
+  const { key, uploadId } = await env.r2_drive.createMultipartUpload(crypto.randomUUID(), {
+    httpMetadata: { contentType },
+  });
+  const thumbnailUrl = thumbnail ? await getPresignedThumbnailUrl(key, thumbnail) : null;
+  return { key, uploadId, thumbnailUrl };
+};
+
+interface GetPresignedPartUrlParams {
+  key: string;
+  uploadId: string;
+  partNumber: number;
+  fileSize: number;
+}
+export const getPresignedPartUrl = ({ key, uploadId, partNumber, fileSize }: GetPresignedPartUrlParams) => {
+  const { partSize, partCount } = getPartLayout(fileSize);
+  const contentLength = partNumber < partCount ? partSize : fileSize - partSize * (partCount - 1);
+  return getSignedUrl(
+    S3,
+    new UploadPartCommand({
+      Bucket: env.BUCKET_NAME,
+      Key: key,
+      UploadId: uploadId,
+      PartNumber: partNumber,
+      ContentLength: contentLength,
+    }),
+    { expiresIn: 3600 },
+  );
+};
+
+export const completeMultipartUpload = (key: string, uploadId: string, parts: R2UploadedPart[]) =>
+  env.r2_drive.resumeMultipartUpload(key, uploadId).complete(parts);
+
+export const abortMultipartUpload = (key: string, uploadId: string) =>
+  env.r2_drive.resumeMultipartUpload(key, uploadId).abort();
 
 // deletes and listing use the native R2 binding: the S3 XML APIs cannot be
 // parsed in workerd (the AWS SDK resolves a DOMParser-based XML parser there)

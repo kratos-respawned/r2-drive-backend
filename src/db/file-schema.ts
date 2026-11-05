@@ -45,6 +45,10 @@ export const uploadRequests = sqliteTable(
     // for non-image files (e.g. video posters uploaded by the native client)
     hasThumbnail: t.integer("has_thumbnail", { mode: "boolean" }).notNull().default(false),
     status: t.text("status").notNull().default("pending"), // pending | completed | expired
+    // set only for multipart uploads; unfinished parts never appear in a bucket listing
+    uploadId: t.text("upload_id"),
+    sizeInBytes: t.integer("size_in_bytes"),
+    lastActivityAt: t.integer("last_activity_at", { mode: "timestamp_ms" }),
     createdAt: t
       .integer("created_at", { mode: "timestamp_ms" })
       .default(sql`(cast(unixepoch('subsecond') * 1000 as integer))`)

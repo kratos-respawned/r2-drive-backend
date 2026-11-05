@@ -1,7 +1,6 @@
 import { env, SELF } from "cloudflare:test";
 import { beforeAll, beforeEach, describe, expect, it, vi } from "vitest";
 import { runStorageCleanup } from "../src/lib/cleanup";
-import { DEFAULT_STORAGE_ALLOCATED_KB } from "../src/lib/constants";
 import {
   BASE_URL,
   PASSWORD,
@@ -525,7 +524,7 @@ describe("file urls", () => {
 });
 
 describe("signup defaults", () => {
-  it("allocates default storage so a brand-new signup can upload immediately", async () => {
+  it("gives a brand-new signup no storage", async () => {
     const email = `fresh-${crypto.randomUUID()}@example.com`;
     const signUp = await SELF.fetch(`${BASE_URL}/api/auth/sign-up/email`, {
       method: "POST",
@@ -538,7 +537,16 @@ describe("signup defaults", () => {
       .prepare("SELECT storage_allocated FROM user WHERE email = ?")
       .bind(email)
       .first<{ storage_allocated: number }>();
-    expect(row?.storage_allocated).toBe(DEFAULT_STORAGE_ALLOCATED_KB);
+    expect(row?.storage_allocated).toBe(0);
+  });
+
+  it("blocks every upload path for an account with no storage", async () => {
+    const newcomer = filesApi((await createTestUser(0)).cookie);
+    const file = { name: "a.txt", contentType: "text/plain", size: 1 };
+
+    expect((await newcomer.uploadUrl(file)).status).toBe(400);
+    expect((await newcomer.uploadUrls([file])).status).toBe(400);
+    expect((await newcomer.startMultipart(file)).status).toBe(400);
   });
 });
 
@@ -571,5 +579,113 @@ describe("storage cleanup", () => {
     await runStorageCleanup();
 
     expect(await bucketKeys()).toEqual(["live-key", "pending-key"]);
+  });
+});
+
+describe("multipart uploads", () => {
+  const HOUR = 60 * 60 * 1000;
+  const fileBytes = new Uint8Array(500 * 1024).fill(7);
+  const file = { name: "big.mov", contentType: "video/quicktime", size: fileBytes.length, parentPath: "" };
+
+  const startUpload = async () => {
+    const res = await api.startMultipart(file);
+    expect(res.status).toBe(200);
+    const { key } = (await res.json()) as { key: string };
+    const row = await env.db_r2_drive
+      .prepare("SELECT upload_id FROM upload_requests WHERE key = ?")
+      .bind(key)
+      .first<{ upload_id: string }>();
+    return { key, upload: env.r2_drive.resumeMultipartUpload(key, row!.upload_id) };
+  };
+
+  const sendOnlyPart = async (upload: R2MultipartUpload) => {
+    const { partNumber, etag } = await upload.uploadPart(1, fileBytes);
+    return [{ partNumber, etag: `"${etag}"` }];
+  };
+
+  const setAge = (key: string, createdAgo: number, lastActiveAgo: number) =>
+    env.db_r2_drive
+      .prepare("UPDATE upload_requests SET created_at = ?, last_activity_at = ? WHERE key = ?")
+      .bind(Date.now() - createdAgo, Date.now() - lastActiveAgo, key)
+      .run();
+
+  it("joins the parts and commits like a normal upload", async () => {
+    const { key, upload } = await startUpload();
+    const urls = await api.partUrls(key, [1]);
+    expect(urls.status).toBe(200);
+
+    const joined = await api.completeMultipart(key, await sendOnlyPart(upload));
+    expect(joined.status).toBe(200);
+    const committed = await api.confirm({ ...file, key });
+
+    expect(committed.status).toBe(201);
+    expect(await getObjectPaths(userId)).toEqual(["big.mov"]);
+    expect(await bucketKeys()).toEqual([key]);
+    expect((await env.r2_drive.head(key))?.size).toBe(fileBytes.length);
+  });
+
+  it("frees the parts and the quota when the client never comes back", async () => {
+    const { key, upload } = await startUpload();
+    const parts = await sendOnlyPart(upload);
+    expect((await api.startMultipart({ ...file, name: "second.mov", size: 800 * 1024 })).status).toBe(400);
+
+    await setAge(key, 3 * HOUR, 3 * HOUR);
+    await runStorageCleanup();
+
+    expect(await getUploadRequestStatus(key)).toBe("expired");
+    await expect(upload.complete(parts.map((part) => ({ ...part, etag: part.etag.replaceAll('"', "") })))).rejects.toThrow();
+    expect((await api.completeMultipart(key, parts)).status).toBe(404);
+    expect((await api.startMultipart({ ...file, name: "second.mov", size: 800 * 1024 })).status).toBe(200);
+  });
+
+  it("keeps a long upload alive while the client is still working", async () => {
+    const { key, upload } = await startUpload();
+    const parts = await sendOnlyPart(upload);
+    await setAge(key, 5 * HOUR, 10 * 60 * 1000);
+
+    await api.uploadUrl({ name: "small.txt", contentType: "text/plain", size: 1 });
+    await runStorageCleanup();
+
+    expect(await getUploadRequestStatus(key)).toBe("pending");
+    expect((await api.completeMultipart(key, parts)).status).toBe(200);
+  });
+
+  it("deletes a joined file that was never committed", async () => {
+    const { key, upload } = await startUpload();
+    await api.completeMultipart(key, await sendOnlyPart(upload));
+    expect(await bucketKeys()).toEqual([key]);
+
+    await setAge(key, 3 * HOUR, 3 * HOUR);
+    await runStorageCleanup();
+
+    expect(await bucketKeys()).toEqual([]);
+  });
+
+  it("aborts the parts when the client cancels", async () => {
+    const { key, upload } = await startUpload();
+    const parts = await sendOnlyPart(upload);
+
+    expect((await api.cancelUpload(key)).status).toBe(200);
+
+    await vi.waitFor(async () => {
+      await expect(upload.complete(parts.map((part) => ({ ...part, etag: part.etag.replaceAll('"', "") })))).rejects.toThrow();
+    });
+    expect(await getUploadRequestStatus(key)).toBe("expired");
+  });
+
+  it("rejects a file whose parts do not add up to its size", async () => {
+    const { key, upload } = await startUpload();
+    const { partNumber, etag } = await upload.uploadPart(1, fileBytes.slice(0, 100));
+
+    expect((await api.completeMultipart(key, [{ partNumber, etag }])).status).toBe(400);
+    expect(await bucketKeys()).toEqual([]);
+  });
+
+  it("does not let another user touch the upload", async () => {
+    const { key } = await startUpload();
+    const stranger = filesApi((await createTestUser(1000)).cookie);
+
+    expect((await stranger.partUrls(key, [1])).status).toBe(404);
+    expect((await stranger.completeMultipart(key, [{ partNumber: 1, etag: "x" }])).status).toBe(404);
   });
 });
